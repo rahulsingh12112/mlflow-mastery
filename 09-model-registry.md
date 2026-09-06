@@ -1,169 +1,128 @@
-# Topic 9: MLflow Model Registry (⭐⭐⭐⭐ Governance Deep Dive)
+# Topic 9: MLflow Model Registry ⭐⭐⭐⭐
 
-> **Interview weight HIGH — governance/deployment ke sawaal yahan se**
-> **Prerequisites:** File 05 (server/DB backend), File 06 (models)
-> **Source:** mxagar/mlflow_guide §11 + MLflow official docs
+> Governance ka dil. Teacher-session style + production lab. Interview: deployment/governance sawaal yahan se.
 
 ---
 
-## 🎯 One-Liner (Interview)
+## Kahani — Kya + Kyun
 
-> "Model Registry ek central database hai jahan model versions unke metadata ke saath store hote — model artifacts jahan hain wahin rehte, sirf reference + metadata registry me. Registry version management, aur deployment lifecycle (staging → production → archive, ab tags/aliases se) handle karta. DB backend mandatory."
+Tracking me models log kiye. Par 50 runs ke baad: kaunsa production me jaana chahiye? kaunsa live hai? kisne approve kiya? naya version aaya to purane ka kya? Ye governance problem **Model Registry** solve karta — ek **central catalog** (library ke register jaisa) jahan har model ka naam, version, status likha hai.
 
----
+**Key insight:** Registry model ko **MOVE nahi karta** — actual model file jahan hai (S3) wahin rehti, registry sirf **reference + metadata + version + alias/tag** rakhta. (Networking analogy: IPAM/CMDB — central record, actual device jahan hai wahin.)
 
-## Layer 1: Kya Aur Kyun?
-
-File 02 me humne model **log** kiya (artifacts me save). Par:
-- Kaunsa model version production me hai?
-- Kisne approve kiya?
-- Naya version aaya to purane ka kya?
-
-**Registry yeh solve karta** — models ka **central version-controlled catalog** with governance.
-
-**Key insight:** Registry model ko **move nahi karta** — artifacts jahan (S3) wahin rehte. Registry sirf **reference + metadata + version + stage** store karta.
-
-**Networking analogy:** Registry = **IPAM / CMDB for models**. Central catalog — kaunsa model version kahan, kis stage me, kisne approve kiya. Actual model (device) jahan hai wahin, registry uska authoritative record rakhta.
+**Recent change (interview trap):** Pehle 4 stages the — None/Staging/Production/Archived. **DEPRECATED.** Ab **Tags** (manual labels) + **Aliases** (named pointer jaise "champion"). "Staging/Production stages" bologe = purana knowledge signal.
 
 ---
 
-## Layer 2: Pre-requisites
+## Points
 
-Registry chalane ko:
-1. **DB backend** — `mlflow server` with SQLite/PostgreSQL (file store se registry NAHI chalta!)
-2. Model **log** kiya hua
+### 1. Registry = central version-controlled catalog
+- Versions auto-increment (v1, v2, v3...) har register pe.
+- Metadata: version, tags, alias, description, registered date, kisne (audit trail — compliance).
+- Model ko move nahi karta — artifacts S3 me, registry sirf reference+metadata.
+- ⚠️ DB backend MANDATORY (file store se registry nahi chalta).
 
-```python
-mlflow.set_tracking_uri("http://127.0.0.1:5000")  # server with DB
+### 2. Stages DEPRECATED → Tags + Aliases
+- Purana (mat bolo): None/Staging/Production/Archived.
+- Naya: **Tags** (`production`, `validated`) + **Aliases** (`champion`, `challenger`).
+- Alias = named pointer to a version, fetch `models:/wine-classifier@champion`.
+- Alias = DNS CNAME jaisa: indirection, code me alias use, version hardcode nahi.
+
+### 3. Champion/Challenger (production pattern)
+- Champion = current prod (alias). Challenger = naya candidate (alias).
+- A/B: 90% champion, 10% challenger → challenger better → **alias swap** (promote). Code change nahi.
+- Rollback = champion alias purane version pe → instant, plug-and-play.
+
+---
+
+## Diagram
+
+```
+   Runs (50 models) → REGISTRY (central catalog)
+   ┌────────────────────────────────────────────┐
+   │ Model: "wine-classifier"                     │
+   │   v1  [tag: archived]                        │
+   │   v2  ← alias: champion   (production)       │
+   │   v3  ← alias: challenger (A/B candidate)    │
+   └────────────────────────────────────────────┘
+        │ registry = reference + metadata (NOT the file)
+        └─→ actual model files S3 me (registry move nahi karta)
+
+   Deploy: code "models:/wine-classifier@champion"
+   Promote: challenger better → alias swap (v3=champion), code same
+   Rollback: champion alias v2 pe wapas (instant)
+   Alias = DNS CNAME | stages DEPRECATED
 ```
 
-> **Critical (interview):** Registry ke liye DB backend MANDATORY. Yeh File 05 ke Scenario 2+ se connect.
+---
+
+## AI infra se jodo
+- Registry = DB backend → RDS PostgreSQL (production).
+- Champion/challenger = 2.6 A/B deployment + 5F GitOps (alias swap = deploy).
+- Rollback via alias = 4.4 HA/DR instant model rollback.
+- SageMaker Model Registry = AWS native; MLflow = open-source alternative.
 
 ---
 
-## Layer 3: Model Register Karna — 3 Tarike
+## Interview one-liner
+> "The Model Registry is a central version-controlled catalog — it stores references, metadata, versions, but the actual model files stay in S3, and it needs a DB backend. Old Staging/Production stages are deprecated; now tags and aliases. An alias like 'champion' is a named pointer to a version, like a DNS CNAME — for champion/challenger you A/B test and swap the alias to promote, with instant rollback by re-pointing, no code change."
 
-### 1. UI se
-Run → Artifacts → model select → **"Register Model"** → naam do. Same naam dobara = nayi version.
+---
 
-### 2. log_model me register
+## 🧪 LAB (production-style) — Register + version + alias
+
+Server chal raha ho (Topic 5, DB backend — registry ke liye zaroori).
+
+### Step 1 — train.py me register add
 ```python
 mlflow.sklearn.log_model(
-    model, "model",
-    registered_model_name="elasticnet-wine",  # yeh diya = auto-register
+    model, name="model", signature=signature, input_example=X_te[:2],
+    registered_model_name="wine-classifier"   # auto-register
 )
 ```
+`python3 train.py` 2-3 baar → registry me v1, v2, v3.
 
-### 3. register_model() se (alag call)
+### Step 2 — champion alias (MlflowClient)
 ```python
-mlflow.sklearn.log_model(lr, "model")  # pehle log (no name)
-
-mlflow.register_model(
-    model_uri=f"runs:/{run.info.run_id}/model",
-    name="elasticnet-wine",
-    tags={"stage": "staging"},
-)
+# set_alias.py
+import mlflow
+from mlflow import MlflowClient
+mlflow.set_tracking_uri("http://127.0.0.1:5000")
+client = MlflowClient()
+client.set_registered_model_alias("wine-classifier", "champion", version=2)
+print("champion = v2")
 ```
 
-**Har register = version auto-increment** (v1, v2, v3...).
-
-### Registered model load:
+### Step 3 — champion load (jaise production)
 ```python
-model = mlflow.pyfunc.load_model(model_uri="models:/elasticnet-wine/1")
-# models:/<name>/<version>  ya  models:/<name>@<alias>
+# load_champion.py
+import mlflow
+mlflow.set_tracking_uri("http://127.0.0.1:5000")
+model = mlflow.pyfunc.load_model("models:/wine-classifier@champion")
+print("Loaded champion:", model)
 ```
 
----
+### Step 4 — UI: Models tab → wine-classifier → versions + champion alias
 
-## Layer 4: Stages vs Aliases (IMPORTANT — recent change)
-
-### PURANA tarika (DEPRECATED now):
-Model 4 stages me hota tha:
-- **None**
-- **Staging** — production candidate
-- **Production** — live
-- **Archived** — retired
-
-> **Interview trap:** Agar tu "Staging/Production stages" bolega, interviewer soch sakta tu purana knowledge rakhta. **Yeh ab deprecated hai.** Naya jaanna zaroori.
-
-### NAYA tarika (current):
-1. **Tags** — manually version ko tag karo: `staging`, `production`, `archive`
-2. **Aliases** — named reference to a specific version:
-   - `champion` alias ek version ko
-   - Fetch: `models:/<name>@champion`
-   - API: `get_model_version_by_alias()`
-
-```python
-# Alias set (champion = production model)
-client.set_registered_model_alias("elasticnet-wine", "champion", version=3)
-
-# Load by alias
-model = mlflow.pyfunc.load_model("models:/elasticnet-wine@champion")
-```
-
-**Kyun aliases better:** flexible — `champion`/`challenger` A/B testing, code me alias reference (version hardcode nahi). Deploy pe alias badlo, code same.
-
-**Networking analogy:** Alias = **DNS CNAME / floating IP**. `champion` ek CNAME jaise — kis actual version (server) pe point karta woh badal sakta, par clients `champion` hi use karte. Version hardcode nahi — indirection.
+### Kya dekhna
+- Multiple versions, v2 pe champion alias.
+- `@champion` se load (version hardcode nahi = indirection).
+- Alias badlo (v3 champion) → code same. Rollback = wapas v2.
 
 ---
 
-## Layer 5: Champion/Challenger Deployment (Production pattern)
-
-Interview me yeh bolna advanced dikhata:
-- **Champion** = current production model (alias `champion`)
-- **Challenger** = naya candidate (alias `challenger`)
-- Traffic split: 90% champion, 10% challenger (A/B test)
-- Challenger better perform kare → promote to champion (alias swap)
-- Code change nahi — sirf alias update
-
-**Rollback:** champion alias purane version pe point kar do — instant rollback.
+## ⚠️ GOTCHAS
+1. Registry = metadata only; actual model S3 me (move nahi karta).
+2. Stages DEPRECATED → tags + aliases (interview trap).
+3. DB backend mandatory (file store = no registry).
+4. Register ≠ deploy (registry catalog hai, serving alag).
+5. Alias = indirection → code me alias use, version hardcode mat karo.
 
 ---
 
-## Layer 6: Metadata & Descriptions
+## Q&A (interview)
+**Q: Registry file store karta ya reference?** — "Sirf reference + metadata (versions/tags/aliases/description); actual model S3 me. Move nahi karta."
 
-Registry me **model level** aur **version level** dono pe metadata:
-- **Descriptions** — model kya karta, kab train hua
-- **Tags** — framework, data slice, production-ready?
+**Q: Stages ki jagah ab kya?** — "Deprecated stages → tags (labels) + aliases (named pointers like champion). Alias = DNS CNAME jaisa indirection."
 
-```python
-# Model level tag
-client.set_registered_model_tag("elasticnet-wine", "team", "ml-platform")
-
-# Version level tag
-client.set_model_version_tag("elasticnet-wine", "1", "validated", "true")
-```
-
-**Governance value:** audit trail — kaunsa version kab, kisne, kis data pe. Compliance ke liye critical.
-
----
-
-## 🎤 Interview Q&A
-
-**Q1: Model Registry kya, kyun?**
-> "Central version-controlled catalog for models with metadata + deployment lifecycle. Artifacts jahan (S3) wahin, registry reference/metadata/version/stage rakhta. Governance — kaunsa version live, kisne approve. DB backend mandatory."
-
-**Q2: Stages deprecate kyun, ab kya?**
-> "Purane None/Staging/Production/Archived stages deprecated. Ab Tags (manual labels) aur Aliases (named refs like champion). Aliases flexible — champion/challenger, code me alias reference, deploy pe swap, rollback easy."
-
-**Q3: Champion/Challenger kaise?**
-> "Champion = current prod (alias), challenger = candidate. A/B traffic split, challenger better → alias swap to promote. Code change nahi, sirf alias. Rollback = champion alias purane version pe."
-
-**Q4: log_model vs register_model?**
-> "log_model model artifacts me save. register_model (ya registered_model_name param) usko registry me version banata. log = save, register = catalog + govern."
-
-**Q5: Registry ke liye kya chahiye?**
-> "DB backend (SQLite/PostgreSQL) mandatory — file store se registry nahi chalta. Server with --backend-store-uri as DB."
-
----
-
-## ⚠️ Gotchas
-
-1. **DB backend mandatory** — file store = no registry
-2. **Stages DEPRECATED** — interview me aliases/tags bolo, na ki Staging/Production stages
-3. **Register ≠ deploy** — registry catalog hai, actual serving alag (File 12)
-4. **Alias = indirection** — code me alias use karo, version hardcode mat karo (flexibility)
-
----
-
-## Next: File 10 — MLflow Projects
+**Q: Champion/challenger + rollback?** — "Champion=prod, challenger=candidate; A/B test → alias swap to promote (code same); rollback = champion alias purane version pe, instant."
