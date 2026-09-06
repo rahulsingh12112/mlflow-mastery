@@ -1,192 +1,118 @@
-# Topic 5: MLflow Tracking Server Architecture (ARCHITECT-LEVEL Deep Dive)
+# Topic 5: MLflow Tracking Server Architecture ⭐⭐⭐⭐⭐
 
-> **⭐⭐⭐⭐ Interview weight — yeh TERA role ka core hai (Infra Architect)**
-> **Prerequisites:** File 02 (Tracking)
-> **Source:** mxagar/mlflow_guide §7 + MLflow official docs
-
----
-
-## 🎯 One-Liner (Interview)
-
-> "MLflow client-server architecture pe chalta — client (tera training code) REST se tracking server se baat karta. Server ke 2 storage components hain: Backend Store (metadata: params, metrics, tags — DB ya file) aur Artifact Store (models, plots, large files — S3/local). Deployment 4 scenarios me scale hota: pure local → local+SQLite → local server → fully remote+distributed (S3 + PostgreSQL)."
+> Architect ke liye HIGHEST-weight topic. Teacher-session style + production lab.
+> Ye "UI galat folder / local mlruns" problem ka asli production ilaaj.
 
 ---
 
-## Layer 1: Client-Server Model (Fundamental)
+## Kahani — Kya + Kyun
 
-MLflow do parts me:
+Local MLflow = sab kuch laptop ke `mlruns/` folder me — solo dev ke liye theek. Par team (5 data scientists) me: har ek ka `mlruns` alag, koi kisi ka run nahi dekh sakta, "team ka best model kaunsa" ka single jawab nahi. Isiliye **production me central tracking server** — ek jagah jahan sab log karte, sab dekhte. MLflow "mere laptop ka tool" se "team ka platform" ban jaata.
 
-```
-┌─────────────┐         REST API          ┌──────────────────┐
-│   CLIENT    │  ────────────────────────▶│  TRACKING SERVER │
-│ (tera code, │  ◀────────────────────────│                  │
-│  Python API)│                            │  ┌─────────────┐ │
-└─────────────┘                            │  │Backend Store│ │ ← metadata
-                                           │  │(DB/file)    │ │   (params,
-                                           │  └─────────────┘ │    metrics,
-                                           │  ┌─────────────┐ │    tags)
-                                           │  │Artifact     │ │ ← models,
-                                           │  │Store(S3/dir)│ │   plots,
-                                           │  └─────────────┘ │   files
-                                           └──────────────────┘
-```
+**Critical architect concept:** MLflow do alag cheezein alag jagah store karta:
+- **Metadata** (params, metrics, tags, run info) — chhota, structured, query-able → **database** (backend store)
+- **Artifacts** (model files, plots — bade blobs) → **file/object store** (artifact store, S3)
 
-**Client** = jahan training chalti (tera laptop/EC2/notebook). Python API call karta.
-**Server** = data manage karta, 2 stores ke saath.
-
-**Networking analogy:** Bilkul **client-server** jaise. Client = network device jo SNMP traps bhejta. Server = NMS (Network Management System) jo do jagah store karta — metadata DB me, aur bulk data (pcaps/logs) file storage me.
+Alag isliye kyunki nature alag: metadata chhota+query-able (DB best), artifacts bade blobs (object store best).
 
 ---
 
-## Layer 2: 2 Storage Components (INTERVIEW GOLD)
+## Points
 
-Yeh farak interview me **guaranteed** poochha jaata:
+### 1. Do stores (interview me zaroor)
+- **Backend store** — metadata (params/metrics/tags/run+experiment info). → SQLite (local), PostgreSQL/MySQL/RDS (production).
+- **Artifact store** — actual files (model binaries, plots, datasets). → local folder ya **S3** (production).
+- ⚠️ **Registry ke liye DB backend MANDATORY** — file store se registry nahi chalta.
 
-### 1. Backend Store — metadata
-Kya store karta: **params, metrics, tags, run info, experiment info** (structured, small data).
+### 2. 4 Deployment Scenarios
+```
+1. Local files    → backend + artifacts dono ./mlruns (solo dev)
+2. Local + SQLite → backend SQLite DB, artifacts local (registry ke liye DB chahiye)
+3. Remote server  → central mlflow server, team connect (DB backend + artifact store)
+4. Full production→ mlflow server on EC2/ECS + PostgreSQL(RDS) + S3 artifacts
+```
 
-Do types:
-- **DB Stores:** SQLite, MySQL, **PostgreSQL**, MS SQL
-- **File Stores:** local filesystem, etc.
-
-### 2. Artifact Store — bulk files
-Kya store karta: **models, images, plots, datasets** (large, binary files).
-
-Location: local folder, **Amazon S3**, Azure Blob, GCS, etc.
-
-**Kyun 2 alag?**
-- Metadata = chhota, structured → DB fast queries/filtering ke liye
-- Artifacts = bade binary files → object storage (S3) cheap + scalable
-
-**Networking analogy:** Backend store = **config database** (structured, queryable — jaise IPAM/CMDB). Artifact store = **bulk file storage** (jaise TFTP/S3 pe firmware images, backups). Do alag kyunki nature alag — ek queryable metadata, doosra bulk blobs.
+### 3. Client-Server model
+- Client (DS code) → `set_tracking_uri("http://server:5000")` → server pe log.
+- Server → metadata DB me, artifacts S3 me.
+- Sab clients → ek server → single source of truth. UI-folder-mismatch khatam.
 
 ---
 
-## Layer 3: Networking (Communication) — 3 Types
+## Diagram
 
-Client aur server kaise baat karte:
-1. **REST API (HTTP)** — most common, default
-2. **RPC (gRPC)** — high-performance
-3. **Proxy access** — restricted, role-based access
+```
+   [DS1] [DS2] [DS3]  → set_tracking_uri("http://mlflow-server:5000")
+        \    |    /
+     ┌──────────── MLflow Tracking Server (EC2/ECS) ────────────┐
+     │  metadata (params/metrics/tags) → BACKEND (PostgreSQL/RDS)│
+     │  artifacts (model/plots, bade)  → ARTIFACT STORE (S3)     │
+     └───────────────────────────────────────────────────────────┘
+   Backend = DB (chhota, query-able) | Artifact = S3 (bade blobs)
+```
 
 ---
 
-## Layer 4: 4 DEPLOYMENT SCENARIOS (Zero → Enterprise)
+## AWS stack (production)
+- Backend store = **RDS PostgreSQL** (metadata)
+- Artifact store = **S3** (model blobs)
+- Server = **ECS/EKS** (container) ya EC2
+- Pitch: "Production MLflow: server on ECS, backend RDS PostgreSQL, artifacts S3 — full AWS-native."
 
-Yeh tere liye **most important section**. Interview me "local se production tak kaise scale karoge" — yeh answer.
+---
 
-### Scenario 1: Pure Local (Development)
-```
-Client: tera laptop
-Server: NAHI (koi `mlflow server` nahi)
-Backend: ./mlruns folder
-Artifacts: ./mlruns folder
-```
-- Sabse simple, laptop pe experiment
-- `mlflow ui` se dekho
-- **Problem:** team share nahi kar sakti, scale nahi
+## Interview one-liner
+> "MLflow separates two stores: a backend store for metadata (params, metrics, tags) — structured and query-able, so a database like PostgreSQL/RDS in production; and an artifact store for large files like model binaries, so an object store like S3. In production a central tracking server (on ECS/EC2) is what all clients connect to via the tracking URI — single source of truth. Note: the model registry requires a DB backend, not a file store."
 
-### Scenario 2: Local + SQLite (Slightly better)
-```
-Client: laptop
-Server: NAHI
-Backend: SQLite DB (local)  ← ab DB me metadata
-Artifacts: ./mlruns folder
-```
-- Metadata DB me → better queries, model registry enable hota (registry ko DB chahiye!)
-- **Note:** Model Registry ke liye DB backend MANDATORY (file store se registry nahi chalta)
+---
 
-### Scenario 3: Local Server (Team, single machine)
-```
-Client: laptop → REST → Server
-Server: `mlflow server` launched (localhost:5000)
-Backend: ./mlruns ya SQLite
-Artifacts: ./mlruns
-```
+## 🧪 LAB (production-style) — Central server, DB backend + artifact store
+
+Ye "UI folder mismatch" ka asli fix.
+
+### Step 1 — Server chalao (SQLite backend + dedicated artifact root)
 ```bash
+cd ~/mlflow-lab
 mlflow server \
-  --backend-store-uri sqlite:///mlflow.db \
-  --default-artifact-root ./mlflow-artifacts \
+  --backend-store-uri sqlite:///$HOME/mlflow-lab/mlflow.db \
+  --default-artifact-root $HOME/mlflow-lab/mlartifacts \
   --host 127.0.0.1 --port 5000
+# terminal chhod do (server chal raha), naya terminal kholo
 ```
-- Ab REST se connect, dedicated server process
-- Code me: `mlflow.set_tracking_uri("http://127.0.0.1:5000")`
 
-### Scenario 4: Remote & Distributed (PRODUCTION — enterprise)
+### Step 2 — train.py me server point karo (top pe)
+```python
+mlflow.set_tracking_uri("http://127.0.0.1:5000")   # server, local files nahi
+mlflow.set_experiment("wine-classifier")
 ```
-Client: laptop/EC2/notebook → REST → Remote Server
-Server: `mlflow server` on remote host (EC2), ports exposed
-Backend: PostgreSQL (on separate DB node/RDS)   ← metadata
-Artifacts: Amazon S3 bucket                       ← models/files
-```
+
+### Step 3 — naye terminal se train
 ```bash
-mlflow server \
-  --backend-store-uri postgresql://user:pass@postgres-host:5432/mlflowdb \
-  --default-artifact-root s3://my-mlflow-bucket \
-  --host 0.0.0.0 --port 5000
+cd ~/mlflow-lab
+python3 train.py    # data server ke DB + artifact folder me, ./mlruns me nahi
 ```
 
-**Yeh production architecture hai — TERE role ka answer:**
-- **Backend:** PostgreSQL (RDS) — metadata, HA, queryable
-- **Artifacts:** S3 — cheap, scalable, durable
-- **Server:** EC2/ECS/EKS — client REST se connect
-- Team-wide, scalable, durable
+### Step 4 — UI
+`http://127.0.0.1:5000` — ab KISI BHI folder se train chalao, same data (folder-mismatch gone).
 
-**Networking analogy:** Scenario 1-2 = ek router pe local logging. Scenario 4 = **centralized enterprise logging** — dedicated syslog server (EC2), structured DB (PostgreSQL/RDS), bulk storage (S3). Distributed, HA, team-wide — bilkul enterprise NMS setup.
-
----
-
-## Layer 5: Scenario Comparison Table
-
-| Scenario | Backend | Artifacts | Server? | Use-case |
-|----------|---------|-----------|---------|----------|
-| 1. Pure Local | ./mlruns | ./mlruns | No | Solo dev |
-| 2. Local+SQLite | SQLite | ./mlruns | No | Registry enabled |
-| 3. Local Server | SQLite/file | local | Yes | Small team, 1 machine |
-| 4. Remote Distributed | **PostgreSQL** | **S3** | Yes (remote) | **Production/enterprise** |
+### Kya dekhna
+- `mlflow.db` (backend — metadata, SQLite)
+- `mlartifacts/` (artifacts — model files)
+- Do alag jagah = backend vs artifact store LIVE
+- Production: SQLite→RDS PostgreSQL, mlartifacts/→S3
 
 ---
 
-## Layer 6: Production Considerations (Architect thinking)
-
-Interview me yeh bolna depth dikhata:
-
-1. **HA (High Availability):** MLflow server ko ECS/EKS pe multiple replicas, load balancer ke peeche
-2. **Security:** Server ko VPC me, private subnet; auth (basic auth / reverse proxy with OIDC); S3 bucket policies; RDS encryption
-3. **Cost:** S3 lifecycle policies (purane artifacts Glacier), RDS right-sizing
-4. **Backup:** RDS automated backups, S3 versioning
-5. **Networking:** Server ko internet-facing mat rakho; VPN/PrivateLink se access
-
-> **Honesty note:** MLflow ka built-in auth basic hai. Production me **reverse proxy (nginx/ALB) + OIDC/SSO** laga ke secure karte. Yeh bolna — tera security background chamkega.
+## ⚠️ GOTCHAS
+1. Registry ke liye DB backend MANDATORY (file store = no registry).
+2. Central server = single source of truth → local mlruns folder-mismatch problem solved.
+3. Backend = metadata (DB), Artifact = files (S3) — MAT mix, ye do alag.
 
 ---
 
-## 🎤 Interview Q&A (yeh section RATTA + samajh — tere role ka core)
+## Q&A (interview)
+**Q: Backend vs artifact store?** — "Backend = metadata (params/metrics/tags), structured/query-able → DB (RDS PostgreSQL prod). Artifact = large files (model binaries/plots) → object store (S3). Alag kyunki nature alag."
 
-**Q1: Backend store vs artifact store?**
-> "Backend store metadata rakhta — params, metrics, tags, run/experiment info — DB ya file (production me PostgreSQL). Artifact store bulk files rakhta — models, plots, datasets — S3/local. Do alag kyunki metadata structured+queryable, artifacts large binary blobs."
+**Q: AWS production setup?** — "Server on ECS/EKS, backend RDS PostgreSQL, artifacts S3."
 
-**Q2: Local se production tak MLflow kaise scale karoge?**
-> "4 scenarios: (1) pure local mlruns, (2) local+SQLite for registry, (3) local dedicated server, (4) production — remote mlflow server on EC2/EKS, backend PostgreSQL/RDS, artifacts S3. Client REST se connect. HA ke liye multiple replicas + ALB, VPC + auth for security."
-
-**Q3: Model registry ke liye kya chahiye?**
-> "DB backend mandatory — SQLite/PostgreSQL/MySQL. File store se registry nahi chalta. Isliye Scenario 2+ (DB backend) chahiye registry ke liye."
-
-**Q4: Client-server communication?**
-> "REST API (HTTP) default; gRPC bhi possible. Client (training code) set_tracking_uri se server ko point karta, phir sab logging REST se server ko jaata."
-
-**Q5: Production MLflow secure kaise?**
-> "Server private subnet me (VPC), reverse proxy + OIDC/SSO for auth (built-in auth basic hai), S3 bucket policies + encryption, RDS encryption + backups. Internet-facing avoid."
-
----
-
-## ⚠️ Gotchas
-
-1. **Registry needs DB** — file store se registry nahi. SQLite minimum.
-2. **`--host 0.0.0.0`** production me — par tab firewall/security group se protect karo (warna world-open)
-3. **Artifact store client se accessible hona chahiye** — S3 credentials client ke paas ho (warna model download fail)
-4. **Public DNS badalta** — EC2 restart pe IP/DNS change, tracking URI update karna pad sakta (Elastic IP use karo)
-
----
-
-## Next: File 06 — Model Component & Signatures
+**Q: Local se production kaise scale?** — "4 scenarios: local files → local+SQLite → remote server → full prod (ECS server + RDS + S3). Team ke liye central server = single source of truth."
