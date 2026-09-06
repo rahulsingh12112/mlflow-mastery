@@ -1,0 +1,15 @@
+# Lab artifacts — commit nahi karne
+mlruns/
+mlartifacts/
+*.db
+*.sqlite
+
+# Python / venv
+venv/
+path/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS
+.DS_Store

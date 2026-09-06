@@ -1,189 +1,141 @@
-# Topic 2: MLflow Tracking — Experiments & Runs (Complete Deep Dive)
+# Topic 2: MLflow Tracking — Experiments & Runs
 
-> **Target Role:** AI Infrastructure Architect / Senior ML Platform Engineer
-> **Prerequisites:** File 01 (MLflow 4 components)
-> **Source:** mxagar/mlflow_guide §3 + MLflow official docs
-
----
-
-## 🎯 One-Liner (Interview)
-
-> "MLflow Tracking ek API + UI hai jo har ML training run ke parameters, metrics, aur artifacts ko log karta hai, taaki hum experiments compare karke best model choose kar sakein. Hierarchy: ek Experiment ke andar multiple Runs, har Run ek code execution."
+> Teacher-session style (flowing + lab). Learner: Rahul. Style: kahani → points → diagram → interview one-liner → lab (production-style) → Q&A.
+> Prereq: MLflow ke 4 components (Tracking, Models, Registry, Projects).
 
 ---
 
-## Layer 1: Kya Aur Kyun?
+## Kahani — Kya + Kyun
 
-File 01 ki problem yaad kar: 50 experiments chalaye, bhool gaye konsa best. **Tracking yeh solve karta.**
+Socho ek data scientist roz 20-30 baar model train kar raha hai — har baar thoda alag setting (learning rate badla, data badla). Kuch din baad wo bhool jaata hai "kaunsi setting pe best accuracy aayi thi." Ye chaos har ML team me hota — koi record nahi. **Tracking** isi ko fix karta: har training **run** ko automatically record karta — "is run me lr 0.01 tha, 10 epochs, accuracy 92%." Agle din 50 runs ho chuke, MLflow UI me sab ek table me, sort/compare karke "best kaunsa" bol sakte ho.
 
-Har training run pe MLflow record karta:
-- **Parameters** — alpha, learning rate (jo tune set kiye)
-- **Metrics** — accuracy, RMSE (jo results aaye)
-- **Artifacts** — model file, plots, datasets
-- **Metadata** — time, code version, status
-
-Phir UI me sab compare karke best chunte.
-
-**Networking analogy:** Tracking = **syslog + monitoring dashboard** for ML experiments. Har run log hota timestamp ke saath, baad me analyze/compare.
+Ek zaroori structure — **Experiment** aur **Run** ka rishta. Ek **Experiment** = ek project/problem ("fraud-detection-model"). Uske andar bahut **Runs** = har baar train karne pe ek naya run. Matlab **Experiment = folder, Run = us folder ke andar ek attempt**. Grouping isliye taaki ek project ke saare attempts ek jagah rahein, alag projects mix na hon.
 
 ---
 
-## Layer 2: Experiment vs Run (Interview me GUARANTEED)
+## Points
 
-### Experiment = logical group (folder)
-Ek project ka container. "Wine Quality Prediction" = ek experiment.
+### 1. Run = ek training execution
+Ek run me log hota:
+- **Parameters** — input settings (learning_rate, epochs, batch_size). Fixed inputs.
+- **Metrics** — output results (accuracy, loss, f1). Time ke saath change ho sakte (per epoch).
+- **Artifacts** — files (trained model, plots, confusion matrix).
+- **Tags** — metadata (team, git-commit, data-version).
 
-### Run = ek single execution (folder ke andar entry)
-Ek experiment me **multiple runs**. Har run = ek baar code chalaya, ek params set ke saath.
+### 2. Experiment = runs ka group
+- Experiment = ek problem/project. Run = us project ka ek attempt.
+- Sab runs ek experiment ke andar → UI me compare.
+- Production: **naam se experiment banao** (`set_experiment("...")`), default nahi.
+
+### 3. Tracking URI (data kahan jaaye)
+- `mlflow.set_tracking_uri(...)` — batata data kahan store ho.
+- Local: files (`./mlruns`) ya SQLite.
+- Production: **remote tracking server** (backend DB + artifact store), team share kare (Topic 5).
+
+---
+
+## Diagram
 
 ```
-Experiment: "Wine Quality Prediction"
-├── Run 1: alpha=0.7 → RMSE=0.82
-├── Run 2: alpha=0.5 → RMSE=0.75   ← best!
-└── Run 3: alpha=0.1 → RMSE=0.79
-```
+   EXPERIMENT: "wine-classifier"
+   ├── Run 1: params{n_est:100, depth:5}  → metrics{acc:0.89} → artifact{model}
+   ├── Run 2: params{n_est:200, depth:10} → metrics{acc:0.92} ← BEST
+   ├── Run 3: params{n_est:50,  depth:3}  → metrics{acc:0.85}
+   └── ... (UI me compare, sort by accuracy)
 
-**Networking analogy:** Experiment = ek project (e.g., "BGP migration"). Run = us project ke andar har individual config-push with different settings.
+   Experiment = folder (project) | Run = ek attempt (training execution)
+```
 
 ---
 
-## Layer 3: Basic Tracking Code (Hands-on)
+## Interview one-liner
+> "Tracking logs each run's parameters, metrics, and artifacts under an experiment, which groups related runs — so an experiment is a project and each run is one attempt, compared side-by-side in the UI. The tracking URI decides where data goes: local files for dev, a remote tracking server with DB backend + artifact store for teams."
 
+---
+
+## 🧪 LAB (production-style)
+
+### Setup (ek baar)
+```bash
+pip3 install mlflow scikit-learn pandas
+mlflow --version
+mkdir -p ~/mlflow-lab && cd ~/mlflow-lab
+```
+
+### train.py (production-grade: signature + input example)
 ```python
 import mlflow
 import mlflow.sklearn
-from mlflow.models import infer_signature
-from sklearn.linear_model import ElasticNet
-from sklearn.metrics import mean_squared_error
+from mlflow.models.signature import infer_signature
+from sklearn.datasets import load_wine
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 
-# 1. Train (with-block ke BAHAR — best practice)
-lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
-lr.fit(train_x, train_y)
+mlflow.set_experiment("wine-classifier")   # naam se, default nahi
 
-# 2. Evaluate
-predicted = lr.predict(test_x)
-rmse = mean_squared_error(test_y, predicted, squared=False)
+X, y = load_wine(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# 3. Experiment set (nahi hai to banega)
-exp = mlflow.set_experiment(experiment_name="wine_quality")
+with mlflow.start_run(run_name="rf-baseline"):
+    n_estimators = 100
+    max_depth = 5
 
-# 4. Signature (input/output schema)
-signature = infer_signature(train_x, lr.predict(train_x))
+    mlflow.log_param("n_estimators", n_estimators)   # 1. params
+    mlflow.log_param("max_depth", max_depth)
 
-# 5. Run (with-block = auto start/end)
-with mlflow.start_run(experiment_id=exp.experiment_id):
-    mlflow.log_param("alpha", alpha)
-    mlflow.log_param("l1_ratio", l1_ratio)
-    mlflow.log_metric("rmse", rmse)
-    mlflow.sklearn.log_model(
-        sk_model=lr,
-        artifact_path="wine_model",
-        signature=signature,
-        input_example=train_x[:2],
-    )
+    model = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+    model.fit(X_tr, y_tr)
+    preds = model.predict(X_te)
+    acc = accuracy_score(y_te, preds)
+
+    mlflow.log_metric("accuracy", acc)               # 2. metric
+
+    signature = infer_signature(X_te, preds)         # 3. artifact (production-grade)
+    mlflow.sklearn.log_model(model, name="model", signature=signature, input_example=X_te[:2])
+
+    print(f"Run done — accuracy: {acc:.3f}")
 ```
 
-| Code | Kya karta |
-|------|-----------|
-| `set_experiment(name)` | Experiment banao/select |
-| `start_run()` | Run shuru (auto-end in with) |
-| `log_param(k, v)` | Ek hyperparameter |
-| `log_metric(k, v)` | Ek result metric |
-| `log_model(...)` | Model artifact save |
-| `infer_signature(...)` | Schema auto-detect |
-
-> **Best practice:** `fit()` with-block ke bahar — fail hone pe corrupt run na bane.
-
----
-
-## Layer 4: mlruns Folder (Local Store)
-
-```
-mlruns/
-├── 0/                    # default exp (ignore)
-├── 99xxx/                # tera experiment
-│   ├── meta.yaml         # exp info
-│   ├── 8c3xxx/           # ek RUN
-│   │   ├── meta.yaml     # run info
-│   │   ├── artifacts/    # model.pkl, MLmodel, conda.yaml, requirements.txt
-│   │   ├── metrics/      # 1 file per metric
-│   │   ├── params/       # 1 file per param
-│   │   └── tags/         # metadata
-│   └── 6bdxxx/           # doosra run
-└── models/               # registry (agar register kiya)
-```
-
-**Insights:**
-- Har run = ek folder
-- `artifacts/` me sab kuch jo model re-create ko chahiye
-- Local hai — production me S3/DB remote (File 05)
-- log ≠ register (registry alag, File 09)
-
-> **Gotcha:** `mlruns/` ko `.gitignore` me daalo. Data hai, code nahi.
-
----
-
-## Layer 5: MLflow UI
-
+### Chalao (3 runs, alag settings)
 ```bash
-mlflow ui   # http://127.0.0.1:5000
+python3 train.py                          # baseline
+# edit: n_estimators=200, max_depth=10 → python3 train.py
+# edit: n_estimators=50,  max_depth=3  → python3 train.py
 ```
 
-Tabs: **Experiments** (runs) + **Models** (registered).
-
-Kar sakta:
-- Runs ke params/metrics dekhna, filter/sort
-- 2+ runs "Compare" → parallel/scatter/box/contour plots
-- CSV download
-- Run kholke artifacts + register
-
-**Analogy:** UI = **Grafana** for experiments.
-
----
-
-## Layer 6: Server Teaser
-
-Abhi server nahi start kiya — library ne local files banaye. Production me:
+### UI (⚠️ IMPORTANT — usi folder se jahan train chalा)
 ```bash
-mlflow server --host 127.0.0.1 --port 8080
-```
-```python
-mlflow.set_tracking_uri("http://127.0.0.1:8080")
+cd ~/mlflow-lab          # jis folder me mlruns bana, wahi se ui
+mlflow ui                # http://127.0.0.1:5000
 ```
 
-- **Bina server:** library files banata (local)
-- **Server ke saath:** library REST se server se baat karta
-
-Poori detail File 05 me (architect-level).
-
----
-
-## 🎤 Interview Q&A
-
-**Q1: Experiment vs Run?**
-> "Experiment logical group/container; Run ek single execution us experiment me apne params/metrics ke saath. Ek exp me multiple runs — compare karke best."
-
-**Q2: Kya log hota?**
-> "Parameters (hyperparams), Metrics (results), Artifacts (model, plots), plus tags/metadata."
-
-**Q3: mlruns folder?**
-> "Local store — har exp ek folder, har run sub-folder with params/metrics/tags/artifacts. Production me S3/DB remote."
-
-**Q4: log vs register?**
-> "log_model = artifacts me save. register = central Registry me version. Alag cheezein."
-
-**Q5: with start_run() kyun?**
-> "Context manager — auto start/end, exception-safe. Training bahar rakhte taaki corrupt run na bane."
+### Kya dekhna
+- "wine-classifier" experiment → 3 runs → accuracy se sort → best
+- Run kholo → Artifacts me model + **signature** (13 wine features in, class out)
 
 ---
 
-## ⚠️ Gotchas
+## ⚠️ GOTCHAS (lab me pakdi)
+1. **UI galat folder → sirf "Default" dikhta.** `mlflow ui` usi folder se chalao jahan `mlruns` bana. Warna alag khaali mlruns dekhta. (Production fix: remote tracking server / fixed SQLite backend — Topic 5.)
+2. **`log_model(model, "model")` deprecated** → `name="model"` use karo.
+3. **Signature na diya → warning.** Production me hamesha `signature` + `input_example` do (serving pe input schema validate hota).
+4. **accuracy 1.000 = red flag** real world me (overfitting/leakage). Wine dataset chhota isliye theek, par production me check karo.
+5. `NotOpenSSLWarning` (LibreSSL) = macOS system ka, harmless, ignore.
 
-1. `mlruns/` local by default — team/prod me remote chahiye (F05)
-2. Training with-block ke andar + crash = corrupt run. Bahar rakho.
-3. Same experiment name = existing use hoga (naya nahi)
-4. `log_param` ek baar/run; `log_metric` multiple (step ke saath, epochs)
+### Fixed-backend trick (production-style, folder se farak nahi)
+```bash
+mlflow server --backend-store-uri sqlite:///$HOME/mlflow.db \
+              --default-artifact-root $HOME/mlartifacts \
+              --host 127.0.0.1 --port 5000
+# train.py me: mlflow.set_tracking_uri("http://127.0.0.1:5000")
+```
 
 ---
 
-## Next: File 03 — Logging Functions (Deep)
+## Q&A (interview)
+**Q: Experiment vs Run?** — "Experiment = project/problem (group), Run = ek training attempt uske andar. Ek experiment me sau runs compare karte."
+
+**Q: Ek run me kya log hota?** — "Parameters (input settings), Metrics (output results), Artifacts (model/plots), Tags (metadata). Params fixed, metrics change ho sakte per-step."
+
+**Q: Tracking data kahan jaata?** — "Tracking URI decide karta — local ./mlruns files, ya remote tracking server (DB backend + artifact store) team ke liye."
